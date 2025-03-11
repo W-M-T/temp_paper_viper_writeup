@@ -1,5 +1,7 @@
 # Paper Viper
 
+<img src="chal_descr.png" alt="Challenge description" width="400">
+
 **Author**: Ward  
 **Flag**: `kalmar{d0nt_play_w1th_5n4kes_if_you_don7_h4ve_gl0v3s}`  
 
