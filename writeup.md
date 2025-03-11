@@ -6,16 +6,18 @@
 **Flag**: `kalmar{d0nt_play_w1th_5n4kes_if_you_don7_h4ve_gl0v3s}`  
 
 ## Setup
-Insert screenshot van de challenge description
+Handout: `chal.py`, `Dockerfile`, `compose.yml`, `getflag.c` and a fake `flag.txt`.
 
-Handout: `chal.py`, `Dockerfile`, `compose.yml`, `getflag.c`
-
-`asteval==1.0.6`, de nieuwste release.
+`chal.py` is the main challenge file. The goal of the challenge is to get code execution on the server and run the getflag binary.
+In the Dockerfile we find that `numpy` is installed, and `asteval` with version `1.0.6` (which is the latest release).
 
 ## The challenge:
+The challenge description is a reference to UofTCTF (shout out to SteakEnthusiast), in which there were three challenges on `asteval`, a "safe sandboxing" library for python.
+After that CTF a few of the vulnerabilities in the library were fixed, but as anyone familiar with pyjails will know, sandboxing python is very difficult to achieve with the amount of introspection the language has, and things like unpatched memory bugs in cpython. In the case of `asteval`, `numpy` is included by default, which dramatically worsens these issues.
 
-TODO: Context from UofTCTF
+After that CTF I went and did some more research into `asteval` and found a few 0days, some of which I turned into this challenge.
 
+The source code of `chal.py`:
 ```python
 import asteval
 
@@ -47,15 +49,25 @@ if __name__ == "__main__":
     main()
 ```
 
+As we can see, the user gives multiline input which is passed through a filter and then evaluated by the `asteval` Interpreter.
+With its default settings, `asteval` includes a large set of `numpy` names in the symbol table available from within the sandbox. In this challenge the player is only given a single one of these, the function `genfromtxt()`, with a comment hinting at the function `type()`.
+
+By default, the name `type` available within the sandbox is a "safe version" of it which returns the name of the type as a string.
+
+The filters included are written to prevent some of the easier unintended solutions. There are a lot unpatched vulnerabilities in `asteval`, some of which are quite trivial, which these filters are intended to prevent.
+
+Specifically they are to block:
+`byte` and `bytearray`, `dtype`, `type` (the numpy attribute), `ctypes`, `format`, `buffer` and dict unwrapping as a way to pass keyword arguments to functions in a way to bypass text filters (since the dictionary keys are string literals that can be constructed past the filter).
+
 Heel janky library, heleboel bugs en 0days aanwezig. numpy geeft huge attack surface, dus het was best een uitdaging om mensen de juiste richting in te duwen van de intended en de unintendeds te filteren zonder dat het super arbitrair wordt.
 Ben ook niet helemaal tevreden door deze filters sinds ze nogal arbitrair zijn, het gaat om de sandbox escape en niet om het bypassen van mijn filters, zoals het geval zou zijn bij e.g. de leuke jailctf pyjails.
 TODO uitleggen hoe de challenge tot stand is gekomen / waar de specifieke filters voor zijn:
 byte, bytearray, format, buffer, dict unpacking for kwargs which would bypass names that would be filtered otherwise (since strings can be constructed to bypass the filter).
 
 ## The solution:
-Tijdens de CTF is hij twee keer opgelost, door bekenden in de pyjail-scene, Lyndon van Maple Mallard Magistrates en oh_word, van Infobahn.
+During the CTF there were two solves, by two familiar faces when it comes to pyjails, Lyndon from MMM and oh_word from Infobahn.
 
-Ook shout out naar PianoMan / SteakEnthusiast
+Lyndon used a method based on f-strings and the well-known method of using `AttributeError.obj` to extract a value from a format string, which was a variant of a solve for the UofTCTF chals TODO CONTINUE HERE
 
 Lyndon gebruikte een f-string-gebaseerde methode (met de breder bekende methode van AttributeError.obj om een waarde uit een format string te redden) die erg leek op de oplossing van een van de chals voor UofTCTF.
 Ik ken de techniek, na UofTCTF is er een patch geweest naar asteval die bedoeld was om het te fixen. Die blijkt niet te werken.
