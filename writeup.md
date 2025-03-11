@@ -52,6 +52,9 @@ byte, bytearray, format, buffer, dict unpacking for kwargs which would bypass na
 
 ## The solution:
 Tijdens de CTF is hij twee keer opgelost, door bekenden in de pyjail-scene, Lyndon van Maple Mallard Magistrates en oh_word, van Infobahn.
+
+Ook shout out naar PianoMan / SteakEnthusiast
+
 Lyndon gebruikte een f-string-gebaseerde methode (met de breder bekende methode van AttributeError.obj om een waarde uit een format string te redden) die erg leek op de oplossing van een van de chals voor UofTCTF.
 Ik ken de techniek, na UofTCTF is er een patch geweest naar asteval die bedoeld was om het te fixen. Die blijkt niet te werken.
 In mijn locale testing-setup werkte het niet (waarschijnlijk omdat ik op een oudere versie van python zat dan op de remote), waardoor ik het niet aan de filters heb toegevoegd.
