@@ -54,56 +54,53 @@ With its default settings, `asteval` includes a large set of `numpy` names in th
 
 By default, the name `type` available within the sandbox is a "safe version" of it which returns the name of the type as a string.
 
-The filters included are written to prevent some of the easier unintended solutions. There are a lot unpatched vulnerabilities in `asteval`, some of which are quite trivial, which these filters are intended to prevent.
+The filters included are written to prevent some of the easier unintended solutions. There are a lot unpatched vulnerabilities in `asteval`, some of which are quite trivial, which these filters are intended to prevent. It was quite challenging to push players in the right direction while restricting unintendeds in a way that doesn't feel too arbitrary, which I feel I didn't really succeed at.
 
-Specifically they are to block:
+Specifically these filters are to block:
 `byte` and `bytearray`, `dtype`, `type` (the numpy attribute), `ctypes`, `format`, `buffer` and dict unwrapping as a way to pass keyword arguments to functions in a way to bypass text filters (since the dictionary keys are string literals that can be constructed past the filter).
-
-Heel janky library, heleboel bugs en 0days aanwezig. numpy geeft huge attack surface, dus het was best een uitdaging om mensen de juiste richting in te duwen van de intended en de unintendeds te filteren zonder dat het super arbitrair wordt.
-Ben ook niet helemaal tevreden door deze filters sinds ze nogal arbitrair zijn, het gaat om de sandbox escape en niet om het bypassen van mijn filters, zoals het geval zou zijn bij e.g. de leuke jailctf pyjails.
-TODO uitleggen hoe de challenge tot stand is gekomen / waar de specifieke filters voor zijn:
-byte, bytearray, format, buffer, dict unpacking for kwargs which would bypass names that would be filtered otherwise (since strings can be constructed to bypass the filter).
 
 ## The solution:
 During the CTF there were two solves, by two familiar faces when it comes to pyjails, Lyndon from MMM and oh_word from Infobahn.
 
-Lyndon used a method based on f-strings and the well-known method of using `AttributeError.obj` to extract a value from a format string, which was a variant of a solve for the UofTCTF chals TODO CONTINUE HERE
+Lyndon's solve is based on f-strings and the well-known method of using `AttributeError.obj` to extract a value from a format string, which was a variant of a solve for the UofTCTF chals. It's a technique that I'm aware of. `asteval` had a patch after UofTCTF which intended to fix this but didn't work. Because of a version difference this didn't work during my testing, so I didn't filter it.
 
-Lyndon gebruikte een f-string-gebaseerde methode (met de breder bekende methode van AttributeError.obj om een waarde uit een format string te redden) die erg leek op de oplossing van een van de chals voor UofTCTF.
-Ik ken de techniek, na UofTCTF is er een patch geweest naar asteval die bedoeld was om het te fixen. Die blijkt niet te werken.
-In mijn locale testing-setup werkte het niet (waarschijnlijk omdat ik op een oudere versie van python zat dan op de remote), waardoor ik het niet aan de filters heb toegevoegd.
-oh_word heeft de intended route voor `type` gevonden, en daarna memory exploitation gedaan.
+oh_word's solve went the intended route to obtain `type` and then did memory exploitation, presumably via the bytes class object.
 
 ### Getting a type primitive:
+The challenge source contains a strong hint to try to obtain a `type` primitive via the one exposed `numpy` function `genfromtxt`. Having `type` would allow us to obtain references to class objects of builtin types but also of `asteval`-internal types for which we have access to their instances.
 
-Uitleg: in de chal wordt hiernaar gehint. Hoe vind je dit?
-Wat intelligente searches op type in `numpy`, e.g. als je zoekt op `type(self.` zijn er 4 resultaten, waarvan er maar 2 geen tests zijn.  Meer algemene searches zullen het ook vinden, maar dan heb je wat meer werk in het wegstrepen van routes die niet werken met user-controlled argumenten.
-In MaskedArray.count ziet het er zo uit:
+The easiest way to find this is to do some smart searches in the `numpy` library. E.g. if we search for `type(self.` we get 4 results, of which only 2 aren't in test files. More broad searches will also find it, though we would have more work in eliminating occurrences where either the arguments aren't user-controlled, or the results won't be reachable from the calling context.
+
+From the two results we get there is one in `MaskedArray.count`:
 ```python
-        if isinstance(self.data, np.matrix):
-            if m is nomask:
-                m = np.zeros(self.shape, dtype=np.bool)
-            m = m.view(type(self.data))
+...
+if isinstance(self.data, np.matrix):
+    if m is nomask:
+        m = np.zeros(self.shape, dtype=np.bool)
+    m = m.view(type(self.data))
+...
 ```
-Dit is niet vulnerable: zelfs als de isinstance-check geen probleem zou zijn, dan nog wordt het resultaat van deze call dusdanig gebruikt dat het niet zomaar mogelijk is om bij het resultaat te kunnen.
+This isn't directly vulnerable: even if the isinstance-check wouldn't be a problem, the result of this call doesn't end up being used in such a way that we can easily get at the result.
 
-De andere optie:
+The other option is in `MaskedIterator.__getitem__`
 ```python
 def __getitem__(self, indx):
-        result = self.dataiter.__getitem__(indx).view(type(self.ma))
-        if self.maskiter is not None:
-            _mask = self.maskiter.__getitem__(indx)
-            if isinstance(_mask, ndarray):
-                # set shape to match that of data; this is needed for matrices
-                _mask.shape = result.shape
-                result._mask = _mask
-            elif isinstance(_mask, np.void):
-                return mvoid(result, mask=_mask, hardmask=self.ma._hardmask)
-            elif _mask:  # Just a scalar, masked
-                return masked
-        return result
+    result = self.dataiter.__getitem__(indx).view(type(self.ma))
+    if self.maskiter is not None:
+        _mask = self.maskiter.__getitem__(indx)
+        if isinstance(_mask, ndarray):
+            # set shape to match that of data; this is needed for matrices
+            _mask.shape = result.shape
+            result._mask = _mask
+        elif isinstance(_mask, np.void):
+            return mvoid(result, mask=_mask, hardmask=self.ma._hardmask)
+        elif _mask:  # Just a scalar, masked
+            return masked
+    return result
 ```
-De getitem van MaskedIterator. self.ma is user-controlled, self.dataiter is user-controlled. Als we dus ervoor kunnen zorgen dat de .view-methode op dat object uit de dataiter zijn argument returnt, of het in een globale lijst opslaat oid, dan kunnen we direct bij het resultaat van type en hebben we een werkende type primitive.
+Note that `self.dataiter` and `self.ma` are user-controlled. Thus, if we can make it so that the `.view` method of the object returned by the `__getitem__` call on `self.dataiter` either returns its argument, or e.g. adds its argument to some global list, this allows us to access the result of `type`. This would give us a useable `type` primitive.
+
+At this point we need to figure out how to get a `MaskedIterator` instance from `genfromtxt`.
 
 ```python
 # Get `type` primitive
